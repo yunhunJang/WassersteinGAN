@@ -14,6 +14,7 @@ from torch.autograd import Variable
 import os
 
 import models.dcgan as dcgan
+import models.dcgan_op as dcgan_op
 import models.mlp as mlp
 import datasets.celeba as celeba
 
@@ -35,6 +36,8 @@ parser.add_argument('--cuda'  , action='store_true', help='enables cuda')
 parser.add_argument('--ngpu'  , type=int, default=1, help='number of GPUs to use')
 parser.add_argument('--netG', default='', help="path to netG (to continue training)")
 parser.add_argument('--netD', default='', help="path to netD (to continue training)")
+parser.add_argument('--netGatt1', default='', help="path to netG for attribute 1")
+parser.add_argument('--netGatt2', default='', help="path to netG for attribute 2")
 parser.add_argument('--clamp_lower', type=float, default=-0.01)
 parser.add_argument('--clamp_upper', type=float, default=0.01)
 parser.add_argument('--Diters', type=int, default=5, help='number of D iters per each G iter')
@@ -121,7 +124,9 @@ if opt.noBN:
 elif opt.mlp_G:
     netG = mlp.MLP_G(opt.imageSize, nz, nc, ngf, ngpu)
 else:
-    netG = dcgan.DCGAN_G(opt.imageSize, nz, nc, ngf, ngpu, n_extra_layers)
+    netG = dcgan_op.DCGAN_G_op(opt.imageSize, nz, nc, ngf, ngpu, n_extra_layers)
+    netGatt1 = dcgan_op.DCGAN_G(opt.imageSize, nz, nc, ngf, ngpu, n_extra_layers)
+    netGatt2 = dcgan_op.DCGAN_G(opt.imageSize, nz, nc, ngf, ngpu, n_extra_layers)
 
 netG.apply(weights_init)
 if opt.netG != '': # load checkpoint if needed
@@ -138,6 +143,14 @@ if opt.netD != '':
     netD.load_state_dict(torch.load(opt.netD))
 print(netD)
 
+# pre-trained attribute GANs
+if opt.netGatt1 != '': # load checkpoint if needed
+    netGatt1.load_state_dict(torch.load(opt.netGatt1))
+    #netGatt1.main.__getitem__(netGatt1.numLyr-2).register_forward_hook(netGatt1.extract)
+if opt.netGatt2 != '': # load checkpoint if needed
+    netGatt2.load_state_dict(torch.load(opt.netGatt2))
+    #netGatt2.main.__getitem__(netGatt2.numLyr-2).register_forward_hook(netGatt2.extract)
+
 input = torch.FloatTensor(opt.batchSize, 3, opt.imageSize, opt.imageSize)
 noise = torch.FloatTensor(opt.batchSize, nz, 1, 1)
 fixed_noise = torch.FloatTensor(opt.batchSize, nz, 1, 1).normal_(0, 1)
@@ -147,6 +160,8 @@ mone = one * -1
 if opt.cuda:
     netD.cuda()
     netG.cuda()
+    netGatt1.cuda()
+    netGatt2.cuda()
     input = input.cuda()
     one, mone = one.cuda(), mone.cuda()
     noise, fixed_noise = noise.cuda(), fixed_noise.cuda()
@@ -202,7 +217,18 @@ for epoch in range(opt.niter):
             # train with fake
             noise.resize_(opt.batchSize, nz, 1, 1).normal_(0, 1)
             noisev = Variable(noise, volatile = True) # totally freeze netG
-            fake = Variable(netG(noisev).data)
+            fake1 = Variable(netGatt1(noisev).data)
+            fake2 = Variable(netGatt2(noisev).data)
+            #feat1 = Variable(netGatt1.feat)
+            #feat2 = Variable(netGatt2.feat)
+            feat1 = netGatt1.featLyr.feat
+            feat2 = netGatt2.featLyr.feat
+            concat_feat = torch.cat((feat1, feat2), 1)
+            concat_feat.requires_grad = False
+            concat_feat.volatile = False
+            #feat2 = Variable(netGatt2.featLyr.output.data)
+            #fake = Variable(netG(noisev).data)
+            fake = Variable(netG(concat_feat).data)
             inputv = fake
             errD_fake = netD(inputv)
             errD_fake.backward(mone)
@@ -219,7 +245,8 @@ for epoch in range(opt.niter):
         # make sure we feed a full batch of noise
         noise.resize_(opt.batchSize, nz, 1, 1).normal_(0, 1)
         noisev = Variable(noise)
-        fake = netG(noisev)
+        fake = netG(concat_feat)
+        #fake = netG(noisev)
         errG = netD(fake)
         errG.backward(one)
         optimizerG.step()
@@ -231,7 +258,13 @@ for epoch in range(opt.niter):
         if gen_iterations % 500 == 0:
             real_cpu = real_cpu#.mul(0.5).add(0.5)
             vutils.save_image(real_cpu, '{0}/real_samples.png'.format(opt.experiment))
-            fake = netG(Variable(fixed_noise, volatile=True))
+            fake1_t = Variable(netGatt1(Variable(fixed_noise)).data)
+            fake2_t = Variable(netGatt2(Variable(fixed_noise)).data)
+            feat1_t = netGatt1.featLyr.feat
+            feat2_t = netGatt2.featLyr.feat
+            concat_feat_t = torch.cat((feat1, feat2), 1)
+            fake = netG(concat_feat_t)
+            #fake = netG(Variable(fixed_noise, volatile=True))
             fake.data = fake.data#.mul(0.5).add(0.5)
             vutils.save_image(fake.data, '{0}/fake_samples_{1}.png'.format(opt.experiment, gen_iterations))
 
